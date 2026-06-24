@@ -76,38 +76,68 @@ end
 local function intersection3D(line_start, line_end, plane, plane_dir)
 	local line = line_end - line_start
 	local dot = plane_dir:Dot(line)
-	
+
 	if math.abs(dot) < 1e-6 then return end
-	
+
 	return line_start + line * (-plane_dir:Dot(line_start - plane) / dot)
 end
 
-local function clipPlane3D(poly, plane, plane_dir)
-	local n = {}
-	
-	local last = poly[#poly]
-	for _, cur in ipairs(poly) do
-		local a = abovePlane(last, plane, plane_dir)
-		local b = abovePlane(cur, plane, plane_dir)
-		
-		if a and b then
-			table.insert(n, cur)
-		elseif a or b then
-			local point = intersection3D(last, cur, plane, plane_dir)
-			-- Check since if the point lies on the plane it will return nil
-			if point then
-				table.insert(n, point)
+local function pushTriangle(result, a, b, c)
+	local i = #result + 1
+	result[i] = a
+	result[i + 1] = b
+	result[i + 2] = c
+end
+
+-- Returns a new triangle mesh after clipping the input mesh with the given plane.
+-- Basically replaces each triangle with its clipped result(s).
+local function clipTriMesh(vertices, plane, plane_dir)
+	local result = {}
+
+	-- iterate over first vertex of each triangle
+	for i = 1, #vertices - 2, 3 do
+		local v1, v2, v3 = vertices[i], vertices[i + 1], vertices[i + 2]
+		local a1 = abovePlane(v1, plane, plane_dir)
+		local a2 = abovePlane(v2, plane, plane_dir)
+		local a3 = abovePlane(v3, plane, plane_dir)
+		local abovecount = (a1 and 1 or 0) + (a2 and 1 or 0) + (a3 and 1 or 0)
+
+		if abovecount == 3 then
+			-- Three vertices above: keep triangle
+			pushTriangle(result, v1, v2, v3)
+		elseif abovecount == 2 then
+			-- Two vertices above: clip to a quad, split the quad into two triangles
+			-- Assign va, vb, vc such that vc is the vertex below the plane
+			local va, vb, vc
+			if not a1 then va, vb, vc = v2, v3, v1       -- v1 below
+			elseif not a2 then va, vb, vc = v3, v1, v2   -- v2 below
+			else va, vb, vc = v1, v2, v3 end             -- v3 below
+
+			local pca = intersection3D(vc, va, plane, plane_dir)
+			local pcb = intersection3D(vc, vb, plane, plane_dir)
+
+			if pca and pcb then
+				pushTriangle(result, va, vb, pcb)
+				pushTriangle(result, va, pcb, pca)
 			end
-			
-			if b then
-				table.insert(n, cur)
+		elseif abovecount == 1 then
+			-- One vertex above: clip to a smaller triangle
+			-- Assign va, vb, vc such that va is the vertex above the plane
+			local va, vb, vc
+			if a1 then va, vb, vc = v1, v2, v3       -- v1 above
+			elseif a2 then va, vb, vc = v2, v3, v1   -- v2 above
+			else va, vb, vc = v3, v1, v2 end         -- v3 above
+
+			local pab = intersection3D(va, vb, plane, plane_dir)
+			local pac = intersection3D(va, vc, plane, plane_dir)
+
+			if pab and pac then
+				pushTriangle(result, va, pab, pac)
 			end
 		end
-		
-		last = cur
 	end
-	
-	return n
+
+	return result
 end
 
 ----------------------------------------
@@ -235,15 +265,14 @@ function ProperClipping.ClipPhysics(ent, norm, dist, keepmass)
 	for i = 1, #norm do
 		local norm = norm[i]
 		local pos = norm * dist[i]
-		
 		local new2 = {}
 		for _, vertices in ipairs(new) do
-			vertices = clipPlane3D(vertices, pos, norm)
+			vertices = clipTriMesh(vertices, pos, norm)
 			if next(vertices) then
 				new2[#new2 + 1] = vertices
 			end
 		end
-		
+
 		new = new2
 	end
 	
